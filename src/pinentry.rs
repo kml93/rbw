@@ -43,6 +43,7 @@ pub async fn getpin(
     opts.envs(env_vars);
 
     let mut child = opts.spawn().map_err(|source| Error::Spawn { source })?;
+    let mut guard = TerminateOnDrop(child.id());
     // unwrap is safe because we specified stdin as piped in the command opts
     // above
     let mut stdin = child.stdin.take().unwrap();
@@ -59,13 +60,13 @@ pub async fn getpin(
         .map_err(|source| Error::WriteStdin { source })?;
     ncommands += 1;
     stdin
-        .write_all(format!("SETDESC {desc}\n").as_bytes())
+        .write_all(format!("SETDESC {}\n", escape(desc)).as_bytes())
         .await
         .map_err(|source| Error::WriteStdin { source })?;
     ncommands += 1;
     if let Some(err) = err {
         stdin
-            .write_all(format!("SETERROR {err}\n").as_bytes())
+            .write_all(format!("SETERROR {}\n", escape(err)).as_bytes())
             .await
             .map_err(|source| Error::WriteStdin { source })?;
         ncommands += 1;
@@ -93,8 +94,42 @@ pub async fn getpin(
         .wait()
         .await
         .map_err(|source| Error::PinentryWait { source })?;
+    guard.disarm();
 
     Ok(crate::locked::Password::new(buf))
+}
+
+// Dropping the getpin future (e.g. when another way to unlock wins) must
+// close the dialog. SIGTERM rather than tokio's SIGKILL lets curses based
+// pinentries restore the terminal; tokio reaps the exited child.
+struct TerminateOnDrop(Option<u32>);
+
+impl TerminateOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TerminateOnDrop {
+    fn drop(&mut self) {
+        let Some(pid) = self
+            .0
+            .and_then(|pid| i32::try_from(pid).ok())
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            return;
+        };
+        let _ =
+            rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+    }
+}
+
+// Percent-encodes what the Assuan protocol would otherwise misread, so that
+// texts can contain newlines.
+fn escape(text: &str) -> String {
+    text.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
 }
 
 async fn read_password<R>(

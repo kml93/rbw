@@ -96,6 +96,11 @@ configuration options:
 * `pinentry`: The
   [pinentry](https://www.gnupg.org/related_software/pinentry/index.html)
   executable to use. Defaults to `pinentry`.
+* `unlock_with_device`: Set to `true` to also offer unlocking by approving a
+  "Log in with device" request from another logged in Bitwarden client (for
+  instance the mobile app). The pinentry dialog shows the fingerprint phrase
+  to compare with the one in the app, and still accepts the master password.
+  Defaults to `false`.
 
 ### Profiles
 

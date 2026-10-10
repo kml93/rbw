@@ -7,6 +7,7 @@ pub mod db;
 pub mod dirs;
 pub mod edit;
 pub mod error;
+pub mod fingerprint;
 pub mod identity;
 pub mod json;
 pub mod locked;

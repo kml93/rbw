@@ -75,6 +75,30 @@ pub async fn send_two_factor_email(
         .await
 }
 
+pub async fn create_auth_request(
+    email: &str,
+    public_key: &[u8],
+    access_code: &str,
+) -> Result<String> {
+    let (client, config) = api_client_async().await?;
+    client
+        .create_auth_request(
+            email,
+            &crate::config::device_id(&config).await?,
+            public_key,
+            access_code,
+        )
+        .await
+}
+
+pub async fn auth_request_key(
+    id: &str,
+    access_code: &str,
+) -> Result<Option<String>> {
+    let (client, _) = api_client_async().await?;
+    client.auth_request_key(id, access_code).await
+}
+
 pub fn unlock<S: std::hash::BuildHasher>(
     email: &str,
     password: &crate::locked::Password,
@@ -110,6 +134,20 @@ pub fn unlock<S: std::hash::BuildHasher>(
         Err(e) => return Err(e),
     };
 
+    unlock_with_user_key(key, protected_private_key, protected_org_keys)
+}
+
+/// Unlocks with the user key itself, e.g. as sent by a device that approved
+/// an auth request. Fails with `InvalidMac` if the key does not belong to
+/// this account.
+pub fn unlock_with_user_key<S: std::hash::BuildHasher>(
+    key: crate::locked::Keys,
+    protected_private_key: &str,
+    protected_org_keys: &std::collections::HashMap<String, String, S>,
+) -> Result<(
+    crate::locked::Keys,
+    std::collections::HashMap<String, crate::locked::Keys>,
+)> {
     let protected_private_key =
         crate::cipherstring::CipherString::new(protected_private_key)?;
     let private_key =

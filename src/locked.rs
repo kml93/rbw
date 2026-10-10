@@ -98,6 +98,8 @@ pub struct Keys {
 }
 
 impl Keys {
+    pub const LEN: usize = 64;
+
     pub fn new(keys: Vec) -> Self {
         Self { keys }
     }

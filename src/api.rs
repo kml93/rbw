@@ -392,6 +392,36 @@ struct SendEmailLoginReq {
     sso_email_2fa_session_token: String,
 }
 
+// https://github.com/bitwarden/server/blob/main/src/Core/Auth/Enums/AuthRequestType.cs
+// Official clients only ever send AuthenticateAndUnlock, so this is the type
+// approving devices expect, even when the requester only needs the key.
+const AUTH_REQUEST_TYPE_AUTHENTICATE_AND_UNLOCK: u8 = 0;
+
+#[derive(serde::Serialize, Debug)]
+struct AuthRequestReq {
+    email: String,
+    #[serde(rename = "publicKey")]
+    public_key: String,
+    #[serde(rename = "deviceIdentifier")]
+    device_identifier: String,
+    #[serde(rename = "accessCode")]
+    access_code: String,
+    #[serde(rename = "type")]
+    ty: u8,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct AuthRequestRes {
+    #[serde(rename = "id", alias = "Id")]
+    id: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct AuthRequestResponseRes {
+    #[serde(rename = "key", alias = "Key")]
+    key: Option<String>,
+}
+
 #[derive(serde::Deserialize, Debug)]
 struct SyncRes {
     #[serde(rename = "Ciphers", alias = "ciphers")]
@@ -1098,6 +1128,68 @@ impl Client {
             log::warn!("{code}: {:?}", res.text().await);
             Err(Error::RequestFailed { status: code })
         }
+    }
+
+    /// Asks the user's other devices to approve this one, and returns the
+    /// id of the request. Approving devices encrypt the user key with
+    /// `public_key` (DER encoded `SubjectPublicKeyInfo`).
+    pub async fn create_auth_request(
+        &self,
+        email: &str,
+        device_id: &str,
+        public_key: &[u8],
+        access_code: &str,
+    ) -> Result<String> {
+        let auth_request_req = AuthRequestReq {
+            email: email.to_string(),
+            public_key: crate::base64::encode(public_key),
+            device_identifier: device_id.to_string(),
+            access_code: access_code.to_string(),
+            ty: AUTH_REQUEST_TYPE_AUTHENTICATE_AND_UNLOCK,
+        };
+
+        let client = self.reqwest_client().await?;
+        let res = client
+            .post(self.api_url("/auth-requests"))
+            .json(&auth_request_req)
+            .send()
+            .await
+            .map_err(|source| Error::Reqwest { source })?;
+
+        if res.status() != reqwest::StatusCode::OK {
+            let code = res.status().as_u16();
+            log::warn!("{code}: {:?}", res.text().await);
+            return Err(Error::RequestFailed { status: code });
+        }
+        let auth_request_res: AuthRequestRes = res.json_with_path().await?;
+        Ok(auth_request_res.id)
+    }
+
+    /// Returns the user key encrypted for the auth request's public key, or
+    /// `None` while the request is not approved. The server rate limits this
+    /// endpoint, so callers should wait for the approval notification
+    /// instead of polling it.
+    pub async fn auth_request_key(
+        &self,
+        id: &str,
+        access_code: &str,
+    ) -> Result<Option<String>> {
+        let client = self.reqwest_client().await?;
+        let res = client
+            .get(self.api_url(&format!("/auth-requests/{id}/response")))
+            .query(&[("code", access_code)])
+            .send()
+            .await
+            .map_err(|source| Error::Reqwest { source })?;
+
+        if res.status() != reqwest::StatusCode::OK {
+            let code = res.status().as_u16();
+            log::warn!("{code}: {:?}", res.text().await);
+            return Err(Error::RequestFailed { status: code });
+        }
+        let auth_request_response_res: AuthRequestResponseRes =
+            res.json_with_path().await?;
+        Ok(auth_request_response_res.key)
     }
 
     async fn obtain_sso_code(

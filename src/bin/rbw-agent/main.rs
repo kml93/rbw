@@ -4,6 +4,7 @@ mod actions;
 mod agent;
 mod daemon;
 mod debugger;
+mod device_approval;
 mod notifications;
 mod sock;
 mod ssh_agent;

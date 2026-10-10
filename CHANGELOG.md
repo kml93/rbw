@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+## Added
+
+* `unlock_with_device` option: unlock by approving a "Log in with device"
+  request from another Bitwarden client, as an alternative to typing the
+  master password.
+
 ## [1.15.0] - 2025-12-31
 
 ## Added

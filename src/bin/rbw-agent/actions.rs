@@ -1,5 +1,6 @@
 use anyhow::Context as _;
 use sha2::Digest as _;
+use std::future::Future;
 
 pub async fn register(
     sock: &mut crate::sock::Sock,
@@ -403,6 +404,29 @@ async fn unlock_state(
         };
 
         let email = config_email().await?;
+        let pending = request_device_approval(&email).await;
+        let desc = unlock_description(pending.as_ref().map(
+            crate::device_approval::PendingApproval::fingerprint_phrase,
+        ));
+        let mut approval = unlock_on_approval(
+            pending,
+            protected_private_key.clone(),
+            db.protected_org_keys.clone(),
+        );
+        let unlock_with = |credential| match credential {
+            Credential::Password(password) => rbw::actions::unlock(
+                &email,
+                &password,
+                kdf,
+                iterations,
+                memory,
+                parallelism,
+                &protected_key,
+                &protected_private_key,
+                &db.protected_org_keys,
+            ),
+            Credential::Approved(unlocked) => Ok(unlocked),
+        };
 
         let mut err_msg = None;
         for i in 1_u8..=3 {
@@ -413,30 +437,19 @@ async fn unlock_state(
             } else {
                 None
             };
+            let pinentry = config_pinentry().await?;
             let password = rbw::pinentry::getpin(
-                &config_pinentry().await?,
+                &pinentry,
                 "Master Password",
-                &format!(
-                    "Unlock the local database for '{}'",
-                    rbw::dirs::profile()
-                ),
+                &desc,
                 err.as_deref(),
                 environment,
                 true,
-            )
-            .await
-            .context("failed to read password from pinentry")?;
-            match rbw::actions::unlock(
-                &email,
-                &password,
-                kdf,
-                iterations,
-                memory,
-                parallelism,
-                &protected_key,
-                &protected_private_key,
-                &db.protected_org_keys,
-            ) {
+            );
+            let credential = password_or_approval(password, &mut approval)
+                .await
+                .context("failed to read password from pinentry")?;
+            match unlock_with(credential) {
                 Ok((keys, org_keys)) => {
                     unlock_success(state, keys, org_keys).await?;
                     break;
@@ -456,6 +469,94 @@ async fn unlock_state(
     }
 
     Ok(())
+}
+
+type Unlocked = (
+    rbw::locked::Keys,
+    std::collections::HashMap<String, rbw::locked::Keys>,
+);
+
+// Never completes if the device path fails, so that the master password
+// prompt stays the only way left.
+type PendingUnlock = std::pin::Pin<Box<dyn Future<Output = Unlocked> + Send>>;
+
+enum Credential {
+    Password(rbw::locked::Password),
+    Approved(Unlocked),
+}
+
+const DEVICE_APPROVAL_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+// Device approval is optional: if it can't be requested (e.g. offline), the
+// master password prompt is shown as usual. The timeout keeps an
+// unresponsive network from delaying that prompt.
+async fn request_device_approval(
+    email: &str,
+) -> Option<crate::device_approval::PendingApproval> {
+    if !config_unlock_with_device().await.ok()? {
+        return None;
+    }
+    tokio::time::timeout(
+        DEVICE_APPROVAL_REQUEST_TIMEOUT,
+        crate::device_approval::PendingApproval::request(email),
+    )
+    .await
+    .unwrap_or_else(|elapsed| Err(elapsed.into()))
+    .inspect_err(|e| eprintln!("failed to request device approval: {e:#}"))
+    .ok()
+}
+
+// Validates the approved key here rather than after the race, so that a key
+// which does not unlock this database leaves the password prompt open.
+fn unlock_on_approval(
+    pending: Option<crate::device_approval::PendingApproval>,
+    protected_private_key: String,
+    protected_org_keys: std::collections::HashMap<String, String>,
+) -> PendingUnlock {
+    let Some(pending) = pending else {
+        return Box::pin(std::future::pending());
+    };
+    Box::pin(async move {
+        let unlocked = async {
+            let user_key = pending.approved_user_key().await?;
+            rbw::actions::unlock_with_user_key(
+                user_key,
+                &protected_private_key,
+                &protected_org_keys,
+            )
+            .context("the approved key does not unlock the local database")
+        }
+        .await
+        .inspect_err(|e| eprintln!("device approval failed: {e:#}"));
+        let Ok(unlocked) = unlocked else {
+            return std::future::pending().await;
+        };
+        unlocked
+    })
+}
+
+fn unlock_description(fingerprint_phrase: Option<&str>) -> String {
+    let desc =
+        format!("Unlock the local database for '{}'", rbw::dirs::profile());
+    let Some(fingerprint_phrase) = fingerprint_phrase else {
+        return desc;
+    };
+    format!(
+        "{desc}, or approve the request in the Bitwarden app.\n\n\
+         Check that the app shows this fingerprint phrase:\n\
+         {fingerprint_phrase}"
+    )
+}
+
+async fn password_or_approval(
+    password: impl Future<Output = rbw::error::Result<rbw::locked::Password>>,
+    approval: &mut PendingUnlock,
+) -> rbw::error::Result<Credential> {
+    tokio::select! {
+        password = password => password.map(Credential::Password),
+        unlocked = approval => Ok(Credential::Approved(unlocked)),
+    }
 }
 
 pub async fn unlock(
@@ -846,6 +947,11 @@ async fn config_pinentry() -> anyhow::Result<String> {
     Ok(config.pinentry)
 }
 
+async fn config_unlock_with_device() -> anyhow::Result<bool> {
+    let config = rbw::config::Config::load_async().await?;
+    Ok(config.unlock_with_device)
+}
+
 pub async fn subscribe_to_notifications(
     state: std::sync::Arc<tokio::sync::Mutex<crate::state::State>>,
 ) -> anyhow::Result<()> {
@@ -864,10 +970,9 @@ pub async fn subscribe_to_notifications(
 
     let websocket_url = format!(
         "{}/hub?access_token={}",
-        config.notifications_url(),
+        config.notifications_websocket_url(),
         access_token
-    )
-    .replace("https://", "wss://");
+    );
 
     let mut state = state.lock().await;
     state

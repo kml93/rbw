@@ -184,31 +184,36 @@ impl CipherString {
         &self,
         private_key: &crate::locked::PrivateKey,
     ) -> Result<crate::locked::Vec> {
-        if let Self::Asymmetric { ciphertext } = self {
-            let privkey_data = private_key.private_key();
-            let privkey_data =
-                pkcs7_unpad(privkey_data).ok_or(Error::Padding)?;
-            let pkey = rsa::RsaPrivateKey::from_pkcs8_der(privkey_data)
-                .map_err(|source| Error::RsaPkcs8 { source })?;
-            let mut bytes = pkey
-                .decrypt(rsa::Oaep::new::<sha1::Sha1>(), ciphertext)
-                .map_err(|source| Error::Rsa { source })?;
+        let privkey_data = private_key.private_key();
+        let privkey_data = pkcs7_unpad(privkey_data).ok_or(Error::Padding)?;
+        let pkey = rsa::RsaPrivateKey::from_pkcs8_der(privkey_data)
+            .map_err(|source| Error::RsaPkcs8 { source })?;
+        self.decrypt_locked_rsa(&pkey)
+    }
 
-            // XXX it'd be great if the rsa crate would let us decrypt
-            // into a preallocated buffer directly to avoid the
-            // intermediate vec that needs to be manually zeroized, etc
-            let mut res = crate::locked::Vec::new();
-            res.extend(bytes.iter().copied());
-            bytes.zeroize();
-
-            Ok(res)
-        } else {
-            Err(Error::InvalidCipherString {
+    pub fn decrypt_locked_rsa(
+        &self,
+        pkey: &rsa::RsaPrivateKey,
+    ) -> Result<crate::locked::Vec> {
+        let Self::Asymmetric { ciphertext } = self else {
+            return Err(Error::InvalidCipherString {
                 reason:
                     "found a symmetric cipherstring, expecting asymmetric"
                         .to_string(),
-            })
-        }
+            });
+        };
+        let mut bytes = pkey
+            .decrypt(rsa::Oaep::new::<sha1::Sha1>(), ciphertext)
+            .map_err(|source| Error::Rsa { source })?;
+
+        // XXX it'd be great if the rsa crate would let us decrypt
+        // into a preallocated buffer directly to avoid the
+        // intermediate vec that needs to be manually zeroized, etc
+        let mut res = crate::locked::Vec::new();
+        res.extend(bytes.iter().copied());
+        bytes.zeroize();
+
+        Ok(res)
     }
 }
 

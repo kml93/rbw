@@ -1,5 +1,17 @@
 use futures_util::{SinkExt as _, StreamExt as _};
 
+const SIGNALR_HANDSHAKE: &str =
+    "{\"protocol\":\"messagepack\",\"version\":1}\x1e";
+// length prefixed MessagePack `[6]`
+const SIGNALR_PING: &[u8] = &[0x02, 0x91, 0x06];
+const RECEIVE_MESSAGE_TARGET: &str = "ReceiveMessage";
+// the official server's spelling, which Vaultwarden mirrors
+const AUTH_REQUEST_RESPONSE_TARGET: &str = "AuthRequestResponseRecieved";
+
+pub type WebSocket = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
 #[derive(Clone, Copy, Debug)]
 pub enum Message {
     Sync,
@@ -9,9 +21,7 @@ pub enum Message {
 pub struct Handler {
     write: Option<
         futures::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
+            WebSocket,
             tokio_tungstenite::tungstenite::Message,
         >,
     >,
@@ -88,9 +98,7 @@ async fn subscribe_to_notifications(
 ) -> Result<
     (
         futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
+            WebSocket,
             tokio_tungstenite::tungstenite::Message,
         >,
         tokio::task::JoinHandle<()>,
@@ -98,16 +106,7 @@ async fn subscribe_to_notifications(
     Box<dyn std::error::Error>,
 > {
     let url = url::Url::parse(url.as_str())?;
-    let (ws_stream, _response) =
-        tokio_tungstenite::connect_async(url).await?;
-    let (mut write, read) = ws_stream.split();
-
-    write
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            "{\"protocol\":\"messagepack\",\"version\":1}\x1e".into(),
-        ))
-        .await
-        .unwrap();
+    let (write, read) = connect(url.as_str()).await?.split();
 
     let read_future = async move {
         let sending_channels = &sending_channels;
@@ -133,9 +132,52 @@ async fn subscribe_to_notifications(
     Ok((write, tokio::spawn(read_future)))
 }
 
+/// Connects to a notifications hub and performs the `SignalR` handshake.
+pub async fn connect(
+    url: &str,
+) -> Result<WebSocket, tokio_tungstenite::tungstenite::Error> {
+    let (mut ws_stream, _response) =
+        tokio_tungstenite::connect_async(url).await?;
+    ws_stream
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            SIGNALR_HANDSHAKE.into(),
+        ))
+        .await?;
+    Ok(ws_stream)
+}
+
+/// A `SignalR` keep-alive, for hubs that close silent clients.
+pub fn ping() -> tokio_tungstenite::tungstenite::Message {
+    tokio_tungstenite::tungstenite::Message::Binary(SIGNALR_PING.into())
+}
+
+/// Returns the id of the auth request whose approval this message (from
+/// the anonymous hub) announces.
+pub fn approved_auth_request_id(
+    message: tokio_tungstenite::tungstenite::Message,
+) -> Option<String> {
+    let update = parse_update(message, AUTH_REQUEST_RESPONSE_TARGET)?;
+    let payload = map_value(&update, "Payload")?;
+    Some(map_value(payload, "Id")?.as_str()?.to_string())
+}
+
 fn parse_message(
     message: tokio_tungstenite::tungstenite::Message,
 ) -> Option<Message> {
+    let update = parse_update(message, RECEIVE_MESSAGE_TARGET)?;
+    let ty = map_value(&update, "Type")?.as_i64()?;
+    match ty {
+        11 => Some(Message::Logout),
+        _ => Some(Message::Sync),
+    }
+}
+
+// Returns the update carried by a SignalR MessagePack invocation of
+// `target`, i.e. its first argument.
+fn parse_update(
+    message: tokio_tungstenite::tungstenite::Message,
+    target: &str,
+) -> Option<rmpv::Value> {
     let tokio_tungstenite::tungstenite::Message::Binary(data) = message
     else {
         return None;
@@ -153,22 +195,16 @@ fn parse_message(
     if message_type != 1 {
         return None;
     }
-    let target = unpacked_message.get(3)?.as_str()?;
-    if target != "ReceiveMessage" {
+    if unpacked_message.get(3)?.as_str()? != target {
         return None;
     }
 
-    let args = unpacked_message.get(4)?.as_array()?;
-    let map = args.first()?.as_map()?;
-    for (k, v) in map {
-        if k.as_str()? == "Type" {
-            let ty = v.as_i64()?;
-            return match ty {
-                11 => Some(Message::Logout),
-                _ => Some(Message::Sync),
-            };
-        }
-    }
+    unpacked_message.get(4)?.as_array()?.first().cloned()
+}
 
-    None
+fn map_value<'a>(map: &'a rmpv::Value, key: &str) -> Option<&'a rmpv::Value> {
+    map.as_map()?
+        .iter()
+        .find(|(k, _)| k.as_str() == Some(key))
+        .map(|(_, v)| v)
 }
