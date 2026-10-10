@@ -107,7 +107,7 @@ Smoke tests (Termux, Vaultwarden réel, dossiers XDG isolés, faux pinentry) : a
 
 ## Suite
 
-1. Usage quotidien. Réinstaller après chaque build : `install -m 755 target/release/rbw target/release/rbw-agent "$XDG_BIN_HOME"/`. Pas de release GitHub (binaire de déverrouillage non relu publiquement) ; jamais de binaire dans git.
+1. Usage quotidien. Réinstaller après chaque build : `install -m 755 target/release/rbw target/release/rbw-agent "$XDG_BIN_HOME"/`. Binaires précompilés publiés en release du fork (voir `binaires_precompiles_de_rbw.fr.md`) ; jamais de binaire dans git.
 2. PR upstream : branche depuis `main`, sans #378 ni `.agents/`, avec la description du protocole et des limites.
 
 ## Hors du fork (à faire ailleurs, plus tard)
