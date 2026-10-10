@@ -14,7 +14,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
+            platform: linux_amd64
           - target: aarch64-linux-android
+            platform: android_arm64
             # arboard (clipboard support) does not build on Android
             cargo-flags: --no-default-features
     runs-on: ubuntu-24.04
@@ -50,10 +52,12 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: target/"$TARGET"/release/rbw --version
       - name: Package
-        run: tar -czf "rbw_${GITHUB_REF_NAME}_$TARGET.tar.gz" -C target/"$TARGET"/release rbw rbw-agent
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: tar -czf "rbw_${GITHUB_REF_NAME}_$PLATFORM.tar.gz" -C target/"$TARGET"/release rbw rbw-agent
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.target }}
+          name: ${{ matrix.platform }}
           path: rbw_*.tar.gz
           if-no-files-found: error
   release:
