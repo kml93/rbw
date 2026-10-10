@@ -24,7 +24,7 @@ Pourquoi B : c'est la seule option où le master password n'existe nulle part su
 - Elle est vérifiée par HMAC contre `protected_private_key` dans la base locale de rbw : OK.
 - `masterPasswordHash` vaut `null`. L'appli envoie donc la user key, pas la master key.
 - La phrase d'empreinte reproduit le vecteur de test du SDK Bitwarden.
-- **En attente** : l'utilisateur doit confirmer que la phrase affichée dans l'appli était identique à celle du script.
+- L'utilisateur a confirmé que la phrase affichée dans l'appli Bitwarden était identique à celle du script.
 
 **A** (`spikes/keystore_pinentry/`) :
 - `termux-fingerprint` fonctionne sur Android 15.
@@ -70,13 +70,12 @@ Pourquoi B : c'est la seule option où le master password n'existe nulle part su
 
 ## À vérifier avant d'implémenter B
 
-1. Confirmation de la phrase d'empreinte par l'utilisateur.
-2. Compiler `main` tel quel (`cargo build --release`) sur la machine cible.
-3. Chercher le travail existant : issues et PR upstream sur « login with device » ou « auth request », et les forks `koterpillar/rbw`, `devgar/rbw`, `bearcove/rbw`. Option : ouvrir une issue upstream pour valider le design avant de coder.
-4. Chemins limites avec le PoC : refus (`requestApproved=false`), délai dépassé, appli Bitwarden verrouillée ou fermée, mode hors ligne (il faut retomber sur le master password).
-5. Vérifier quel `AuthRequestType` les clients officiels utilisent pour un simple déverrouillage : 0 (AuthenticateAndUnlock) ou 1 (Unlock). Vaultwarden ignore ce champ, mais pas forcément le cloud Bitwarden.
-6. Durée de vie du refresh token sur Vaultwarden, pour savoir tous les combien `rbw login` et la 2FA reviennent.
-7. Question de design : comment montrer la phrase d'empreinte, alors que rbw-agent n'a pas de tty. Pistes : le pinentry (`SETDESC` / `MESSAGE`), une notification, ou un affichage côté client `rbw`.
+1. Compiler `main` tel quel (`cargo build --release`) sur la machine cible.
+2. Chercher le travail existant : issues et PR upstream sur « login with device » ou « auth request », et les forks `koterpillar/rbw`, `devgar/rbw`, `bearcove/rbw`. Option : ouvrir une issue upstream pour valider le design avant de coder.
+3. Chemins limites avec le PoC : refus (`requestApproved=false`), délai dépassé, appli Bitwarden verrouillée ou fermée, mode hors ligne (il faut retomber sur le master password).
+4. Vérifier quel `AuthRequestType` les clients officiels utilisent pour un simple déverrouillage : 0 (AuthenticateAndUnlock) ou 1 (Unlock). Vaultwarden ignore ce champ, mais pas forcément le cloud Bitwarden.
+5. Durée de vie du refresh token sur Vaultwarden, pour savoir tous les combien `rbw login` et la 2FA reviennent.
+6. Question de design : comment montrer la phrase d'empreinte, alors que rbw-agent n'a pas de tty. Pistes : le pinentry (`SETDESC` / `MESSAGE`), une notification, ou un affichage côté client `rbw`.
 
 ## Plan proposé pour B (esquisse, environ 300-400 lignes de Rust, estimation)
 
@@ -94,7 +93,6 @@ Pourquoi B : c'est la seule option où le master password n'existe nulle part su
 ## Hors du fork (à faire ailleurs, plus tard)
 
 - Config rbw de l'utilisateur : un `lock_timeout` plus court une fois B en place.
-- Dotfiles Termux : `XDG_RUNTIME_DIR` hors de `$TMPDIR`.
 - Installation du binaire patché sans qu'un `pkg upgrade` l'écrase.
 - Appli Bitwarden : délai de verrouillage « Immédiatement » si l'utilisateur veut poser le doigt à chaque approbation.
 - Notes sur l'infrastructure de l'utilisateur : `.agents/scratch/local/` (non suivi par git).
