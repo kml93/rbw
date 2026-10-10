@@ -1,6 +1,6 @@
 # Déverrouillage biométrique de rbw
 
-État au 2026-10-10. B est implémenté sur `kml93` (option `unlock_with_device`), avec la PR doy/rbw#378 (refresh token) mergée dans la branche. Smoke tests sur Termux contre le vrai Vaultwarden : approbation OK (pinentry fermé par SIGTERM, 12 entrées déchiffrées), repli hors ligne OK, option désactivée = aucun appel. Reste : la revue de code, puis préparer la PR upstream (branche depuis `main`, sans #378 ni `.agents/`).
+État au 2026-10-10. B est implémenté sur `kml93` (option `unlock_with_device`), avec la PR doy/rbw#378 (refresh token) mergée dans la branche. Revue faite, correctif IP fait. Binaires installés dans `$XDG_BIN_HOME` (avant `/usr/bin` dans le `PATH`, donc à l'abri de `pkg upgrade`) ; option activée dans la vraie config. Reste : usage quotidien, puis PR upstream (branche depuis `main`, sans #378 ni `.agents/`).
 
 ## Objectif
 
@@ -95,17 +95,19 @@ Pourquoi B : c'est la seule option où le master password n'existe nulle part su
 - `src/bin/rbw-agent/device_approval.rs` : `PendingApproval::request` (RSA-2048, code d'accès, POST, hub anonyme), `fingerprint_phrase`, `approved_user_key` (attente avec ping SignalR toutes les 15 s, délai de 15 min, GET, déchiffrement, contrôle des 64 octets).
 - `unlock_state` : `tokio::select!` entre le pinentry et l'approbation. La clé approuvée est validée **dans** la future d'approbation : en cas d'échec, cette future ne se termine jamais et le pinentry reste ouvert. La demande est créée avec un délai max de 10 s, pour ne pas retarder le pinentry.
 - `src/pinentry.rs` : `TerminateOnDrop` envoie SIGTERM au pinentry quand l'approbation gagne. Les textes `SETDESC` et `SETERROR` sont maintenant encodés en Assuan (`%`, `\r`, `\n`).
-- Revue par 2 agents (correction + coding-rules) appliquée. Points écartés : la gestion des statuts HTTP reste en ligne (convention rbw) et l'IP du GET n'est pas fixée (voir limites).
+- Revue par 2 agents (correction + coding-rules) appliquée. Point écarté : la gestion des statuts HTTP reste en ligne (convention rbw).
+- Correctif IP : `create_auth_request` renvoie un `rbw::api::AuthRequest` (id + adresse serveur du POST via `remote_addr()`) ; `auth_request_key` force cette adresse avec `ClientBuilder::resolve`. Même famille IPv4/IPv6, donc même IP client vue par Vaultwarden. Testé : approbation réelle OK.
 
 Smoke tests (Termux, Vaultwarden réel, dossiers XDG isolés, faux pinentry) : approbation en 2 min 30 puis en 76 s (approbation tardive, hub maintenu), 12 entrées déchiffrées, pinentry fermé par SIGTERM, journal propre ; repli hors ligne (3 essais intacts) ; option désactivée = aucun appel.
 
 **Limites connues** :
-- Vaultwarden exige la même IP client pour le POST et le GET. Sur un réseau double pile, le GET peut partir sur l'autre famille d'adresses (IPv4 ou IPv6). L'approbation est alors perdue et on retombe sur le pinentry. Correctif possible : réutiliser `remote_addr()` du POST via `ClientBuilder::resolve`.
 - Cloud Bitwarden non testé (hub anonyme, ping SignalR).
+- Si le pinentry échoue (pas de tty), l'unlock échoue sans attendre l'approbation.
+- Une demande part à chaque déverrouillage, même si l'utilisateur tape son mot de passe (notification sur le téléphone, demande en attente 15 min). Alternative discutée : `CONFIRM` pinentry à deux boutons avant d'envoyer la demande ; reportée après usage réel.
 
 ## Suite
 
-1. Utiliser le binaire au quotidien (installation hors `pkg upgrade` à décider avec l'utilisateur).
+1. Usage quotidien. Réinstaller après chaque build : `install -m 755 target/release/rbw target/release/rbw-agent "$XDG_BIN_HOME"/`. Pas de release GitHub (binaire de déverrouillage non relu publiquement) ; jamais de binaire dans git.
 2. PR upstream : branche depuis `main`, sans #378 ni `.agents/`, avec la description du protocole et des limites.
 
 ## Hors du fork (à faire ailleurs, plus tard)
