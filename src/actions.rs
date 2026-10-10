@@ -79,7 +79,7 @@ pub async fn create_auth_request(
     email: &str,
     public_key: &[u8],
     access_code: &str,
-) -> Result<String> {
+) -> Result<crate::api::AuthRequest> {
     let (client, config) = api_client_async().await?;
     client
         .create_auth_request(
@@ -92,11 +92,11 @@ pub async fn create_auth_request(
 }
 
 pub async fn auth_request_key(
-    id: &str,
+    auth_request: &crate::api::AuthRequest,
     access_code: &str,
 ) -> Result<Option<String>> {
     let (client, _) = api_client_async().await?;
-    client.auth_request_key(id, access_code).await
+    client.auth_request_key(auth_request, access_code).await
 }
 
 pub fn unlock<S: std::hash::BuildHasher>(

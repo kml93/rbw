@@ -17,7 +17,7 @@ const KEEPALIVE_INTERVAL: std::time::Duration =
 /// it on another device, which then sends the user key encrypted for an
 /// ephemeral key pair that never leaves this process.
 pub struct PendingApproval {
-    id: String,
+    auth_request: rbw::api::AuthRequest,
     access_code: String,
     private_key: rsa::RsaPrivateKey,
     fingerprint_phrase: String,
@@ -38,7 +38,7 @@ impl PendingApproval {
         let access_code = rand::distr::Alphanumeric
             .sample_string(&mut rand::rng(), ACCESS_CODE_LEN);
 
-        let id = rbw::actions::create_auth_request(
+        let auth_request = rbw::actions::create_auth_request(
             email,
             public_key.as_bytes(),
             &access_code,
@@ -46,10 +46,10 @@ impl PendingApproval {
         .await
         .context("failed to create auth request")?;
         // subscribe right away: the server only notifies the approval once
-        let hub = connect_hub(&id).await?;
+        let hub = connect_hub(&auth_request.id).await?;
 
         Ok(Self {
-            id,
+            auth_request,
             access_code,
             private_key,
             // approving clients use the email as the server stores it
@@ -73,16 +73,18 @@ impl PendingApproval {
     ) -> anyhow::Result<rbw::locked::Keys> {
         tokio::time::timeout(
             AUTH_REQUEST_LIFETIME,
-            wait_for_approval(&mut self.hub, &self.id),
+            wait_for_approval(&mut self.hub, &self.auth_request.id),
         )
         .await
         .context("auth request expired")??;
 
-        let encrypted_key =
-            rbw::actions::auth_request_key(&self.id, &self.access_code)
-                .await
-                .context("failed to fetch approved auth request")?
-                .context("auth request was approved without a key")?;
+        let encrypted_key = rbw::actions::auth_request_key(
+            &self.auth_request,
+            &self.access_code,
+        )
+        .await
+        .context("failed to fetch approved auth request")?
+        .context("auth request was approved without a key")?;
         self.decrypt_user_key(&encrypted_key)
     }
 

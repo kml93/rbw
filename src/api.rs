@@ -422,6 +422,15 @@ struct AuthRequestResponseRes {
     key: Option<String>,
 }
 
+/// An auth request created on the server. Vaultwarden only hands the
+/// approved key to the IP address that created the request, so fetching it
+/// goes back to the server address used to create it.
+#[derive(Debug)]
+pub struct AuthRequest {
+    pub id: String,
+    server_addr: Option<std::net::SocketAddr>,
+}
+
 #[derive(serde::Deserialize, Debug)]
 struct SyncRes {
     #[serde(rename = "Ciphers", alias = "ciphers")]
@@ -877,6 +886,13 @@ impl Client {
     }
 
     async fn reqwest_client(&self) -> Result<reqwest::Client> {
+        self.reqwest_client_builder()
+            .await?
+            .build()
+            .map_err(|e| Error::CreateReqwestClient { source: e })
+    }
+
+    async fn reqwest_client_builder(&self) -> Result<reqwest::ClientBuilder> {
         let mut default_headers = axum::http::HeaderMap::new();
         default_headers.insert(
             "Bitwarden-Client-Name",
@@ -917,16 +933,33 @@ impl Client {
             Ok(reqwest::Client::builder()
                 .user_agent(user_agent)
                 .identity(pem)
-                .default_headers(default_headers)
-                .build()
-                .map_err(|e| Error::CreateReqwestClient { source: e })?)
+                .default_headers(default_headers))
         } else {
             Ok(reqwest::Client::builder()
                 .user_agent(user_agent)
-                .default_headers(default_headers)
-                .build()
-                .map_err(|e| Error::CreateReqwestClient { source: e })?)
+                .default_headers(default_headers))
         }
+    }
+
+    // Connects to `server_addr` instead of resolving the host again, so that
+    // a dual-stack client keeps using the same IP version, hence the same
+    // client IP as seen by the server.
+    async fn reqwest_client_to(
+        &self,
+        server_addr: Option<std::net::SocketAddr>,
+    ) -> Result<reqwest::Client> {
+        let builder = self.reqwest_client_builder().await?;
+        let base_url = reqwest::Url::parse(&self.base_url).ok();
+        let host = base_url.as_ref().and_then(reqwest::Url::host_str);
+        let builder = match (host, server_addr) {
+            (Some(host), Some(server_addr)) => {
+                builder.resolve(host, server_addr)
+            }
+            _ => builder,
+        };
+        builder
+            .build()
+            .map_err(|e| Error::CreateReqwestClient { source: e })
     }
 
     pub async fn prelogin(
@@ -1130,16 +1163,16 @@ impl Client {
         }
     }
 
-    /// Asks the user's other devices to approve this one, and returns the
-    /// id of the request. Approving devices encrypt the user key with
-    /// `public_key` (DER encoded `SubjectPublicKeyInfo`).
+    /// Asks the user's other devices to approve this one. Approving devices
+    /// encrypt the user key with `public_key` (DER encoded
+    /// `SubjectPublicKeyInfo`).
     pub async fn create_auth_request(
         &self,
         email: &str,
         device_id: &str,
         public_key: &[u8],
         access_code: &str,
-    ) -> Result<String> {
+    ) -> Result<AuthRequest> {
         let auth_request_req = AuthRequestReq {
             email: email.to_string(),
             public_key: crate::base64::encode(public_key),
@@ -1161,8 +1194,12 @@ impl Client {
             log::warn!("{code}: {:?}", res.text().await);
             return Err(Error::RequestFailed { status: code });
         }
+        let server_addr = res.remote_addr();
         let auth_request_res: AuthRequestRes = res.json_with_path().await?;
-        Ok(auth_request_res.id)
+        Ok(AuthRequest {
+            id: auth_request_res.id,
+            server_addr,
+        })
     }
 
     /// Returns the user key encrypted for the auth request's public key, or
@@ -1171,10 +1208,11 @@ impl Client {
     /// instead of polling it.
     pub async fn auth_request_key(
         &self,
-        id: &str,
+        auth_request: &AuthRequest,
         access_code: &str,
     ) -> Result<Option<String>> {
-        let client = self.reqwest_client().await?;
+        let id = &auth_request.id;
+        let client = self.reqwest_client_to(auth_request.server_addr).await?;
         let res = client
             .get(self.api_url(&format!("/auth-requests/{id}/response")))
             .query(&[("code", access_code)])
