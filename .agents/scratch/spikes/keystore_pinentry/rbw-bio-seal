@@ -1,0 +1,48 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# rbw-bio-seal: store the rbw master password encrypted under a key derived
+# from a signature of the Android Keystore. The keystore key only signs during
+# BIO_VALIDITY seconds after a fingerprint (or a device unlock).
+set -eu
+
+BIO_DIR=${BIO_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/rbw-bio}
+BIO_ALIAS=${BIO_ALIAS:-rbw-bio}
+BIO_VALIDITY=${BIO_VALIDITY:-10}
+KDF='-aes-256-cbc -pbkdf2 -iter 200000 -md sha256'
+
+mkdir -p "$BIO_DIR"
+chmod 700 "$BIO_DIR"
+
+if ! termux-keystore list | jq -e --arg a "$BIO_ALIAS" 'any(.[]; .alias == $a)' >/dev/null; then
+  termux-keystore generate "$BIO_ALIAS" -a RSA -s 2048 -u "$BIO_VALIDITY"
+fi
+
+if [ -t 0 ]; then
+  trap 'stty echo' EXIT INT TERM
+  printf 'Master password: ' >&2
+  stty -echo
+fi
+IFS= read -r pw
+[ -t 0 ] && printf '\n' >&2
+[ -n "$pw" ] || { echo "rbw-bio-seal: empty password" >&2; exit 1; }
+
+case "$(termux-fingerprint -t rbw -d 'Sceller le master password' -c Annuler)" in
+  *AUTH_RESULT_SUCCESS*) ;;
+  *) echo "rbw-bio-seal: fingerprint refused" >&2; exit 1 ;;
+esac
+
+challenge=$(openssl rand -base64 32)
+BIO_KEY=$(printf '%s' "$challenge" | base64 -d | termux-keystore sign "$BIO_ALIAS" SHA256withRSA | base64 -w0)
+[ -n "$BIO_KEY" ] || { echo "rbw-bio-seal: keystore refused to sign (auth window closed?)" >&2; exit 1; }
+export BIO_KEY
+
+# shellcheck disable=SC2086 # KDF holds several openssl options on purpose
+printf '%s' "$pw" | openssl enc $KDF -salt -pass env:BIO_KEY -out "$BIO_DIR/blob.new"
+# shellcheck disable=SC2086
+[ "$(openssl enc -d $KDF -pass env:BIO_KEY -in "$BIO_DIR/blob.new")" = "$pw" ] \
+  || { echo "rbw-bio-seal: round-trip check failed" >&2; exit 1; }
+
+printf '%s\n' "$challenge" >"$BIO_DIR/challenge.new"
+chmod 600 "$BIO_DIR/blob.new" "$BIO_DIR/challenge.new"
+mv "$BIO_DIR/blob.new" "$BIO_DIR/blob"
+mv "$BIO_DIR/challenge.new" "$BIO_DIR/challenge"
+echo "rbw-bio-seal: sealed in $BIO_DIR (key $BIO_ALIAS)" >&2

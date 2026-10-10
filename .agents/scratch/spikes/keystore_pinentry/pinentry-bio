@@ -1,0 +1,50 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# pinentry-bio: pinentry for rbw. Answers the "Master Password" prompt with the
+# blob sealed by rbw-bio-seal after a fingerprint; any other prompt (2FA, API
+# key, retry after a wrong password) or any failure goes to the real pinentry.
+set -u
+
+BIO_DIR=${BIO_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/rbw-bio}
+BIO_ALIAS=${BIO_ALIAS:-rbw-bio}
+PINENTRY_FALLBACK=${PINENTRY_FALLBACK:-pinentry}
+KDF='-aes-256-cbc -pbkdf2 -iter 200000 -md sha256'
+
+# rbw writes every command, closes stdin, then reads: buffer everything first.
+input=$(cat)
+
+fallback() {
+  printf '%s\n' "$input" | "$PINENTRY_FALLBACK" "$@"
+  exit $?
+}
+
+unseal() {
+  [ -f "$BIO_DIR/challenge" ] && [ -f "$BIO_DIR/blob" ] || return 1
+  case "$(termux-fingerprint -t rbw -d 'Déverrouiller le coffre' -c Annuler)" in
+    *AUTH_RESULT_SUCCESS*) ;;
+    *) return 1 ;;
+  esac
+  BIO_KEY=$(base64 -d "$BIO_DIR/challenge" | termux-keystore sign "$BIO_ALIAS" SHA256withRSA | base64 -w0)
+  [ -n "$BIO_KEY" ] || return 1
+  export BIO_KEY
+  # shellcheck disable=SC2086 # KDF holds several openssl options on purpose
+  openssl enc -d $KDF -pass env:BIO_KEY -in "$BIO_DIR/blob" 2>/dev/null
+}
+
+case "$input" in
+  *SETERROR*) fallback "$@" ;;
+  *"SETPROMPT Master Password"*) ;;
+  *) fallback "$@" ;;
+esac
+
+pw=$(unseal) && [ -n "$pw" ] || fallback "$@"
+# Assuan data lines are percent-encoded; a sealed line cannot hold CR/LF.
+encoded=$(printf '%s' "$pw" | sed 's/%/%25/g')
+
+printf 'OK Pleased to meet you\n'
+printf '%s\n' "$input" | while IFS= read -r line; do
+  case "$line" in
+    GETPIN*) printf 'D %s\nOK\n' "$encoded" ;;
+    BYE*) printf 'OK closing connection\n'; break ;;
+    *) printf 'OK\n' ;;
+  esac
+done
